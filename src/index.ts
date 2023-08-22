@@ -1,19 +1,14 @@
 import dotenv from "dotenv";
-dotenv.config();
-
-import {
-  AttachmentBuilder,
-  EmbedBuilder,
-  WebhookClient,
-  WebhookMessageCreateOptions,
-} from "discord.js";
+import { AttachmentBuilder, EmbedBuilder, WebhookClient, WebhookMessageCreateOptions } from "discord.js";
 
 import TensorService, { TensorTransaction } from "./services/TensorService";
-import { nonEmptyStrValidator, roundToDecimal, smartTruncate } from "./utils";
+import { nonEmptyStrValidator, roundToDecimal } from "./utils";
 import { cleanEnv, str } from "envalid";
 import { TwitterApi } from "twitter-api-v2";
 import { getSimplePrice } from "./lib/coingecko";
 import { fileTypeFromBuffer } from "file-type";
+
+dotenv.config();
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -39,7 +34,7 @@ function getRarityTier(rarityRank: number, maxSupply: number): RarityTier {
   const rarityPercentage = rarityRank / maxSupply;
 
   for (const [rarityTier, rarityPercentageThreshold] of Object.entries(
-    RarityTierPercentages
+    RarityTierPercentages,
   )) {
     if (rarityPercentage <= rarityPercentageThreshold) {
       return rarityTier as RarityTier;
@@ -66,13 +61,18 @@ function getRarityColorOrb(rarityTier: RarityTier): string {
   }
 }
 
+function humanize(input: string): string {
+  const lowercase = input.toLowerCase().replace("_", " ");
+  return lowercase.charAt(0).toUpperCase() + lowercase.slice(1);
+}
+
 async function createDiscordSaleEmbed(
   transaction: TensorTransaction,
   imageBuffer: {
     buffer: Buffer;
     fileType: { ext: string; mime: string } | undefined;
   } | null,
-  extra: { stats: { buyNowPriceNetFees: string; numMints: number } }
+  extra: { stats: { buyNowPriceNetFees: string; numMints: number } },
 ): Promise<{ embed: EmbedBuilder; attachment: AttachmentBuilder | null }> {
   const nftName = transaction.mint.name;
   const onchainId = transaction.mint.onchainId;
@@ -80,27 +80,28 @@ async function createDiscordSaleEmbed(
   const buyerId = transaction.tx.buyerId;
   const sellerId = transaction.tx.sellerId;
   const rank = transaction.mint.rarityRankTT;
+  const transactionType = humanize(transaction.tx.txType);
 
   const grossSaleAmount = parseInt(transaction.tx.grossAmount, 10);
 
   const imageAttachment = imageBuffer
     ? new AttachmentBuilder(imageBuffer.buffer, {
-        name: `${onchainId}.${imageBuffer.fileType?.ext}`,
-      })
+      name: `${onchainId}.${imageBuffer.fileType?.ext}`,
+    })
     : null;
 
   const buyerMessage = buyerId
     ? `[${buyerId.slice(
-        0,
-        4
-      )}](https://www.tensor.trade/portfolio?wallet=${buyerId})`
+      0,
+      4,
+    )}](https://www.tensor.trade/portfolio?wallet=${buyerId})`
     : "Unknown";
 
   const sellerMessage = sellerId
     ? `[${sellerId.slice(
-        0,
-        4
-      )}](https://www.tensor.trade/portfolio?wallet=${sellerId})`
+      0,
+      4,
+    )}](https://www.tensor.trade/portfolio?wallet=${sellerId})`
     : "n/a";
 
   const buyerSellerMessage = `${sellerMessage} → ${buyerMessage}`;
@@ -132,10 +133,10 @@ async function createDiscordSaleEmbed(
   ];
 
   const embed = new EmbedBuilder()
-    .setTitle(`${nftName}`)
+    .setTitle(`${transactionType} - ${nftName}`)
     .setURL(`https://www.tensor.trade/item/${onchainId}`)
     .setThumbnail(
-      imageBuffer ? `attachment://${imageAttachment?.name}` : imageUri
+      imageBuffer ? `attachment://${imageAttachment?.name}` : imageUri,
     )
     .addFields([
       {
@@ -156,7 +157,7 @@ async function createDiscordSaleEmbed(
         name: "Price",
         value: `◎${roundToDecimal(
           grossSaleAmount / LAMPORTS_PER_SOL,
-          2
+          2,
         )} (${formattedUsdPrice})`,
         inline: true,
       },
@@ -164,7 +165,7 @@ async function createDiscordSaleEmbed(
         name: "Floor",
         value: `◎${roundToDecimal(
           parseInt(extra.stats.buyNowPriceNetFees, 10) / LAMPORTS_PER_SOL,
-          2
+          2,
         )}`,
         inline: true,
       },
@@ -222,7 +223,7 @@ async function sendTwitterSaleTweet(
     buffer: Buffer;
     fileType: { ext: string; mime: string } | undefined;
   } | null,
-  extra: { stats: { buyNowPriceNetFees: string; numMints: number } }
+  extra: { stats: { buyNowPriceNetFees: string; numMints: number } },
 ) {
   const nftName = transaction.mint.name;
   const onchainId = transaction.mint.onchainId;
@@ -252,7 +253,7 @@ async function sendTwitterSaleTweet(
     rank != null ? `${rarityOrb} ${rarityClass} (${rank})` : "TBD";
   const floorMessage = `📈 ◎${roundToDecimal(
     parseInt(extra.stats.buyNowPriceNetFees, 10) / LAMPORTS_PER_SOL,
-    2
+    2,
   )} floor\n`;
 
   const faction =
@@ -283,7 +284,8 @@ async function sendTwitterSaleTweet(
   });
 }
 
-function logSaleToConsole(transaction: TensorTransaction) {
+function logTransactionToConsole(transaction: TensorTransaction,
+                                 skip?: boolean) {
   const nftName = transaction.mint.name;
   const onchainId = transaction.mint.onchainId;
   const imageUri = transaction.mint.imageUri;
@@ -292,7 +294,9 @@ function logSaleToConsole(transaction: TensorTransaction) {
 
   const grossSaleAmount = transaction.tx.grossAmount;
 
-  console.log(`New sale for ${nftName} (${onchainId})
+  const skipMessage = !!skip ? "skipped" : "";
+
+  console.log(`New ${skipMessage} ${transaction.tx.txType} transaction for ${nftName} (${onchainId})
         Image: ${imageUri}
         Buyer: ${buyerId}
         Seller: ${sellerId}
@@ -308,26 +312,15 @@ async function main() {
     TENSOR_API_KEY: nonEmptyStrValidator(),
     DISCORD_WEBHOOKS: nonEmptyStrValidator(),
     SLUGS: nonEmptyStrValidator(),
-    TWITTER_API_KEY: nonEmptyStrValidator(),
-    TWITTER_API_SECRET: nonEmptyStrValidator(),
-    TWITTER_ACCESS_TOKEN: nonEmptyStrValidator(),
-    TWITTER_ACCESS_TOKEN_SECRET: nonEmptyStrValidator(),
   });
 
   const discordWebhooks = env.DISCORD_WEBHOOKS.split(",").map(
-    (hookUrl) => new WebhookClient({ url: hookUrl })
+    (hookUrl) => new WebhookClient({ url: hookUrl }),
   );
-
-  const twitterClient = new TwitterApi({
-    appKey: env.TWITTER_API_KEY,
-    appSecret: env.TWITTER_API_SECRET,
-    accessToken: env.TWITTER_ACCESS_TOKEN,
-    accessSecret: env.TWITTER_ACCESS_TOKEN_SECRET,
-  });
 
   const tensorService = new TensorService(
     env.TENSOR_API_URL,
-    env.TENSOR_API_KEY
+    env.TENSOR_API_KEY,
   );
 
   await tensorService.connect();
@@ -337,23 +330,44 @@ async function main() {
   }
 
   tensorService.on("transaction", async (transaction, slug) => {
-    const allowedTxTypes = ["SALE_BUY_NOW", "SALE_ACCEPT_BID"];
+    // const allowedTxTypes = [
+    //   "SALE_BUY_NOW",
+    //   "SALE_ACCEPT_BID",
+    //   "LIST",
+    //   "DELIST",
+    //   "ADJUST_PRICE",
+    // ];
+    //
+    // if (!allowedTxTypes.includes(transaction.tx.txType)) {
+    //   return;
+    // }
 
-    if (!allowedTxTypes.includes(transaction.tx.txType)) {
+    logTransactionToConsole(transaction);
+
+    const skullTraitValues = [
+      "Skull Mask",
+      "Skull Mask - Dark",
+      "Horned Skull Mask",
+      "Horned Skull Mask - Dark"
+    ];
+
+    const eyeAttribute = transaction.mint.attributes
+      .find(attr => attr.trait_type === "Eyes");
+    if (!skullTraitValues.includes(eyeAttribute.value)) {
+      logTransactionToConsole(transaction, true);
       return;
     }
 
+
     const stats = await tensorService.getCollectionStats(slug);
     const imageBuffer = await getImageBuffer(transaction.mint.imageUri);
-
-    logSaleToConsole(transaction);
 
     const { embed, attachment } = await createDiscordSaleEmbed(
       transaction,
       imageBuffer,
       {
         stats,
-      }
+      },
     );
 
     for (const webhook of discordWebhooks) {
@@ -370,14 +384,6 @@ async function main() {
       } catch (err) {
         console.error(err);
       }
-    }
-
-    try {
-      await sendTwitterSaleTweet(twitterClient, transaction, imageBuffer, {
-        stats,
-      });
-    } catch (err) {
-      console.error(err);
     }
   });
 }
